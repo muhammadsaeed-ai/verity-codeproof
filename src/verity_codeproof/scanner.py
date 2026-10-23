@@ -20,7 +20,7 @@ class AddedLine:
     text: str
 
 
-_HUNK_RE = re.compile(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_HUNK_RE = re.compile(r"@@ -\d+(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
@@ -76,67 +76,93 @@ _RULES: tuple[tuple[str, str, str, re.Pattern[str], str, str], ...] = (
 
 
 def parse_added_lines(diff_text: str) -> list[AddedLine]:
-    """Parse added lines from unified diff without confusing source code with headers.
+    """Parse new-side added lines from a unified diff using the hunk line counts.
 
-    A file header is recognized only outside a hunk. Within a hunk, one leading
-    '+' is always the patch marker, so source code beginning with '++' is retained.
+    Headers are recognized only outside a hunk. Inside a hunk, the first character
+    is the diff marker, so source lines beginning with '++' or '--' are preserved
+    and reported with their actual new-file line numbers.
     """
     result: list[AddedLine] = []
     current_path: str | None = None
-    next_line: int | None = None
-    in_hunk = False
+    next_line = 0
+    old_remaining = 0
+    new_remaining = 0
 
     for raw_line in diff_text.splitlines():
+        # A real file boundary is authoritative even if an upstream diff was truncated.
         if raw_line.startswith("diff "):
             current_path = None
-            next_line = None
-            in_hunk = False
+            old_remaining = 0
+            new_remaining = 0
             continue
 
-        if raw_line.startswith("@@"):
+        if old_remaining > 0 or new_remaining > 0:
+            if raw_line.startswith("+"):
+                if current_path is not None:
+                    result.append(AddedLine(current_path, next_line, raw_line[1:]))
+                next_line += 1
+                new_remaining -= 1
+            elif raw_line.startswith("-"):
+                old_remaining -= 1
+            elif raw_line.startswith(" "):
+                next_line += 1
+                old_remaining -= 1
+                new_remaining -= 1
+            # "\\ No newline at end of file" is metadata, not a file line.
+            continue
+
+        if raw_line.startswith("+++ "):
+            path = raw_line[4:].strip()
+            current_path = path[2:] if path.startswith("b/") else path
+            next_line = 0
+        elif raw_line.startswith("@@"):
             match = _HUNK_RE.search(raw_line)
-            in_hunk = match is not None
-            next_line = int(match.group(1)) if match else None
-            continue
-
-        if not in_hunk:
-            if raw_line.startswith("+++ "):
-                path = raw_line[4:].strip()
-                current_path = path[2:] if path.startswith("b/") else path
-                next_line = None
-            # File metadata outside hunks is not source code.
-            continue
-
-        if current_path is None or next_line is None:
-            continue
-
-        if raw_line.startswith("+"):
-            result.append(AddedLine(current_path, next_line, raw_line[1:]))
-            next_line += 1
-        elif raw_line.startswith("-"):
-            # Removed lines exist only in the old file; do not advance the new line.
-            continue
-        elif raw_line.startswith(" "):
-            next_line += 1
+            if match:
+                next_line = int(match.group("new_start"))
+                old_count = match.group("old_count")
+                new_count = match.group("new_count")
+                old_remaining = 1 if old_count is None else int(old_count)
+                new_remaining = 1 if new_count is None else int(new_count)
 
     return result
 
 
 def changed_paths(diff_text: str) -> list[str]:
-    """Return new-side paths from file headers, never from source lines in a hunk."""
+    """Return new-side file paths, distinguishing file headers from hunk content."""
     paths: list[str] = []
-    in_hunk = False
-    for line in diff_text.splitlines():
-        if line.startswith("diff "):
-            in_hunk = False
+    old_remaining = 0
+    new_remaining = 0
+
+    for raw_line in diff_text.splitlines():
+        if raw_line.startswith("diff "):
+            old_remaining = 0
+            new_remaining = 0
             continue
-        if line.startswith("@@"):
-            in_hunk = True
+
+        if old_remaining > 0 or new_remaining > 0:
+            if raw_line.startswith("+"):
+                new_remaining -= 1
+            elif raw_line.startswith("-"):
+                old_remaining -= 1
+            elif raw_line.startswith(" "):
+                old_remaining -= 1
+                new_remaining -= 1
             continue
-        if not in_hunk and line.startswith("+++ b/"):
-            path = line[6:]
+
+        if raw_line.startswith("@@"):
+            match = _HUNK_RE.search(raw_line)
+            if match:
+                old_count = match.group("old_count")
+                new_count = match.group("new_count")
+                old_remaining = 1 if old_count is None else int(old_count)
+                new_remaining = 1 if new_count is None else int(new_count)
+            continue
+
+        if raw_line.startswith("+++ b/"):
+            path = raw_line[6:]
             if path != "/dev/null" and path not in paths:
                 paths.append(path)
+
     return paths
 
 
