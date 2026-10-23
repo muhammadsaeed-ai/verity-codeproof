@@ -98,3 +98,55 @@ def test_changed_paths_ignores_added_code_that_looks_like_file_header():
 +++ b/not-a-real-file.py
 """
     assert changed_paths(diff) == ["main.py"]
+
+
+def test_parser_handles_multiple_unified_files_without_git_headers():
+    diff = """--- a/one.py
++++ b/one.py
+@@ -1 +1,2 @@
+ a = 1
++b = 2
+--- a/two.py
++++ b/two.py
+@@ -4,0 +5 @@
++c = 3
+"""
+    lines = parse_added_lines(diff)
+    assert [(line.path, line.number, line.text) for line in lines] == [
+        ("one.py", 2, "b = 2"),
+        ("two.py", 5, "c = 3"),
+    ]
+    assert changed_paths(diff) == ["one.py", "two.py"]
+
+
+def test_removed_content_starting_with_dashes_does_not_reset_the_path():
+    diff = """diff --git a/q.py b/q.py
+--- a/q.py
++++ b/q.py
+@@ -1,3 +1,3 @@
+ keep = 1
+--- removed content that resembles a file header
++changed = 2
+ tail = 3
+"""
+    lines = parse_added_lines(diff)
+    assert [(line.path, line.number, line.text) for line in lines] == [
+        ("q.py", 2, "changed = 2")
+    ]
+
+
+def test_parser_ignores_no_newline_marker_inside_hunk():
+    diff = """diff --git a/m.py b/m.py
+--- a/m.py
++++ b/m.py
+@@ -1 +1,2 @@
+-old = 1
+\\ No newline at end of file
++new = 1
++extra = 2
+"""
+    lines = parse_added_lines(diff)
+    assert [(line.number, line.text) for line in lines] == [
+        (1, "new = 1"),
+        (2, "extra = 2"),
+    ]
