@@ -76,41 +76,64 @@ _RULES: tuple[tuple[str, str, str, re.Pattern[str], str, str], ...] = (
 
 
 def parse_added_lines(diff_text: str) -> list[AddedLine]:
-    """Parse added lines from a unified diff without relying on Git."""
+    """Parse added lines from a unified diff without confusing patch headers with code.
+
+    File headers are only meaningful outside a hunk. Inside a hunk, every leading
+    '+' is the diff marker, even when the added source itself begins with '++'.
+    """
     result: list[AddedLine] = []
     current_path: str | None = None
     next_line: int | None = None
+    in_hunk = False
 
     for raw_line in diff_text.splitlines():
-        if raw_line.startswith("+++ "):
-            path = raw_line[4:].strip()
-            current_path = path[2:] if path.startswith("b/") else path
+        if raw_line.startswith("diff "):
+            current_path = None
             next_line = None
+            in_hunk = False
             continue
+
         if raw_line.startswith("@@"):
             match = _HUNK_RE.search(raw_line)
-            if match:
-                next_line = int(match.group(1))
+            in_hunk = match is not None
+            next_line = int(match.group(1)) if match else None
             continue
-        if raw_line.startswith(("diff ", "index ", "--- ", "new file mode ", "deleted file mode ")):
+
+        if not in_hunk:
+            if raw_line.startswith("+++ "):
+                path = raw_line[4:].strip()
+                current_path = path[2:] if path.startswith("b/") else path
+                next_line = None
+            # File metadata and other text outside hunks are never source lines.
             continue
+
         if current_path is None or next_line is None:
             continue
-        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+
+        if raw_line.startswith("+"):
             result.append(AddedLine(current_path, next_line, raw_line[1:]))
             next_line += 1
-        elif raw_line.startswith("-") and not raw_line.startswith("---"):
+        elif raw_line.startswith("-"):
+            # Removed lines belong to the old file and do not advance new-side lines.
             continue
         elif raw_line.startswith(" "):
             next_line += 1
+
     return result
 
 
 def changed_paths(diff_text: str) -> list[str]:
-    """Return new-side paths listed in a unified diff, preserving order."""
+    """Return new-side paths listed in diff file headers, preserving order."""
     paths: list[str] = []
+    in_hunk = False
     for line in diff_text.splitlines():
-        if line.startswith("+++ b/"):
+        if line.startswith("diff "):
+            in_hunk = False
+            continue
+        if line.startswith("@@"):
+            in_hunk = True
+            continue
+        if not in_hunk and line.startswith("+++ b/"):
             path = line[6:]
             if path != "/dev/null" and path not in paths:
                 paths.append(path)
