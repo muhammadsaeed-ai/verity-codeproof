@@ -73,15 +73,15 @@ def test_added_source_starting_with_two_plus_preserves_line_numbers():
     diff = """diff --git a/main.py b/main.py
 --- a/main.py
 +++ b/main.py
-@@ -1,2 +1,3 @@
+@@ -1 +1,3 @@
  def process():
 +++  x = 0  # source line begins with two plus signs
-     eval(user_input)
++    eval(user_input)
 """
     lines = parse_added_lines(diff)
     assert [(line.path, line.number, line.text) for line in lines] == [
         ("main.py", 2, "++  x = 0  # source line begins with two plus signs"),
-        ("main.py", 3, "   eval(user_input)"),
+        ("main.py", 3, "    eval(user_input)"),
     ]
 
     findings = [item for item in scan_diff(diff) if item.rule_id == "dynamic-eval"]
