@@ -150,3 +150,52 @@ def test_parser_ignores_no_newline_marker_inside_hunk():
         (1, "new = 1"),
         (2, "extra = 2"),
     ]
+
+
+def _dynamic_eval_lines(lines: list[str]) -> list[int]:
+    body = "\n".join(f"+{line}" for line in lines)
+    diff = (
+        "diff --git a/src/app.py b/src/app.py\n"
+        "--- /dev/null\n"
+        "+++ b/src/app.py\n"
+        f"@@ -0,0 +1,{len(lines)} @@\n"
+        f"{body}\n"
+    )
+    return [
+        finding.line
+        for finding in scan_diff(diff)
+        if finding.rule_id == "dynamic-eval"
+    ]
+
+
+def test_dynamic_eval_flags_bare_nested_and_builtins_calls():
+    lines = [
+        "result = eval(user_input)",
+        "exec(code)",
+        "value = eval (expr)",
+        "builtins.eval(expr)",
+        "__builtins__.exec(code)",
+        "wrapped = run(eval(expr))",
+        "builtins . eval (expr)",
+        "eval(",
+    ]
+    assert _dynamic_eval_lines(lines) == list(range(1, len(lines) + 1))
+
+
+def test_dynamic_eval_ignores_methods_definitions_and_string_literals():
+    lines = [
+        "model.eval()",
+        "self.encoder.eval()",
+        "match = pattern.exec(text)",
+        "def eval(self, x):",
+        "    def exec(self):",
+        "def  eval(self, x):",
+        "async def eval(self):",
+        "message = 'eval(user_input)'",
+        'message = "exec(code)"',
+        "message = '''eval(user_input)'''",
+        "text = obj . eval()",
+        "text = foo.builtins.eval(expr)",
+        "message = '# eval(user_input)'",
+    ]
+    assert _dynamic_eval_lines(lines) == []
