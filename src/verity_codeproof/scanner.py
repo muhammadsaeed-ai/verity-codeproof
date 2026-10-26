@@ -5,7 +5,9 @@ These rules are triage signals, not a replacement for code review or a security 
 
 from __future__ import annotations
 
+import io
 import re
+import tokenize
 from dataclasses import dataclass
 
 from verity_codeproof.models import Finding
@@ -21,6 +23,63 @@ class AddedLine:
 
 
 _HUNK_RE = re.compile(r"@@ -\d+(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
+def _has_dynamic_eval_call(text: str) -> bool:
+    """Detect eval/exec calls while ignoring attributes, definitions, comments, and strings."""
+    tokens = []
+    generator = tokenize.generate_tokens(io.StringIO(text).readline)
+    try:
+        while True:
+            tokens.append(next(generator))
+    except StopIteration:
+        pass
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        # Diffs may include incomplete statements. Keep tokens yielded before the error
+        # so a newly added call such as eval( still produces a finding.
+        pass
+
+    ignored_types = {
+        tokenize.ENCODING,
+        tokenize.NL,
+        tokenize.NEWLINE,
+        tokenize.INDENT,
+        tokenize.DEDENT,
+        tokenize.COMMENT,
+        tokenize.ENDMARKER,
+    }
+    significant = [token for token in tokens if token.type not in ignored_types]
+
+    for index, token in enumerate(significant):
+        if token.type != tokenize.NAME or token.string not in {"eval", "exec"}:
+            continue
+        if index + 1 >= len(significant):
+            continue
+        following = significant[index + 1]
+        if following.type != tokenize.OP or following.string != "(":
+            continue
+
+        previous = significant[index - 1] if index else None
+        if previous and previous.type == tokenize.NAME and previous.string == "def":
+            continue
+
+        if previous and previous.type == tokenize.OP and previous.string == ".":
+            # Allow only builtins.eval/exec; ignore ordinary method calls such as
+            # model.eval() and pattern.exec(). Also reject chained foo.builtins.eval().
+            if index >= 2:
+                qualifier = significant[index - 2]
+                preceding = significant[index - 3] if index >= 3 else None
+                if (
+                    qualifier.type == tokenize.NAME
+                    and qualifier.string in {"builtins", "__builtins__"}
+                    and not (preceding and preceding.type == tokenize.OP and preceding.string == ".")
+                ):
+                    return True
+            continue
+
+        return True
+
+    return False
+
+
 _SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
     re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b"),
@@ -31,12 +90,12 @@ _SECRET_PATTERNS = (
     ),
 )
 
-_RULES: tuple[tuple[str, str, str, re.Pattern[str], str, str], ...] = (
+_RULES: tuple[tuple[str, str, str, re.Pattern[str] | None, str, str], ...] = (
     (
         "dynamic-eval",
         "high",
         "Dynamic code evaluation",
-        re.compile(r"\b(?:eval|exec)\s*\("),
+        None,  # Handled by _has_dynamic_eval_call so comments and strings are ignored.
         "Dynamic evaluation can turn untrusted input into executable code.",
         "Remove dynamic evaluation or strictly constrain and validate the input.",
     ),
@@ -202,7 +261,12 @@ def scan_diff(diff_text: str) -> list[Finding]:
 
         if item.path.endswith(".py"):
             for rule_id, severity, title, pattern, message, recommendation in _RULES:
-                if pattern.search(text):
+                matched = (
+                    _has_dynamic_eval_call(text)
+                    if rule_id == "dynamic-eval"
+                    else pattern is not None and pattern.search(text) is not None
+                )
+                if matched:
                     _append_once(
                         findings,
                         seen,
