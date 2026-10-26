@@ -23,6 +23,7 @@ class AddedLine:
 
 
 _HUNK_RE = re.compile(r"@@ -\d+(?:,(?P<old_count>\d+))? \+(?P<new_start>\d+)(?:,(?P<new_count>\d+))? @@")
+
 def _has_dynamic_eval_call(text: str) -> bool:
     """Detect eval/exec calls while ignoring attributes, definitions, comments, and strings."""
     tokens = []
